@@ -7,8 +7,8 @@ import matplotlib.pyplot as plt
 from concurrent.futures import ThreadPoolExecutor
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Sentinelle v3.1 - Macro Alpha", layout="centered")
-st.title("🛡️ Sentinelle Quant Pro v3.1")
+st.set_page_config(page_title="Sentinelle v3.2 - Data Integrity", layout="centered")
+st.title("🛡️ Sentinelle Quant Pro v3.2")
 
 exchange = ccxt.kraken()
 
@@ -20,14 +20,9 @@ default_symbols = [
 ]
 
 st.sidebar.header("⚙️ Matrice")
-selected_symbols = st.sidebar.multiselect("Actifs à surveiller :", options=default_symbols, default=default_symbols)
+selected_symbols = st.sidebar.multiselect("Actifs :", options=default_symbols, default=default_symbols)
 focus_symbol = st.sidebar.selectbox("Actif Focus :", options=selected_symbols, index=0)
 atr_mult = st.sidebar.slider("Sensibilité Stop (ATR) :", 1.0, 3.0, 2.0, 0.1)
-
-st.sidebar.divider()
-st.sidebar.header("📋 Ma Position")
-entry_price = st.sidebar.number_input("Prix d'entrée ($)", value=0.0, step=0.0001, format="%.4f")
-leverage = st.sidebar.number_input("Levier (x)", value=1, min_value=1)
 
 if st.button("⚡ Actualiser les flux"):
     st.cache_data.clear()
@@ -35,7 +30,6 @@ if st.button("⚡ Actualiser les flux"):
 # --- MOTEUR HYBRIDE ---
 def fetch_parallel(symbol):
     try:
-        # Données Macro (DXY & GOOGL) via Yahoo Finance
         if symbol == "GOOGL/USD" or symbol == "DXY":
             yf_ticker = "DX-Y.NYB" if symbol == "DXY" else "GOOGL"
             ticker_yf = yf.Ticker(yf_ticker)
@@ -44,8 +38,6 @@ def fetch_parallel(symbol):
             o15 = [[int(t.timestamp()*1000), r.Open, r.High, r.Low, r.Close, r.Volume] for t, r in df.iterrows()]
             o4 = [[int(t.timestamp()*1000), r.Open, r.High, r.Low, r.Close, r.Volume] for t, r in df4h.iterrows()]
             return symbol, o15, o4, df['Close'].iloc[-1]
-        
-        # Données Crypto via Kraken
         else:
             o15 = exchange.fetch_ohlcv(symbol, timeframe='15m', limit=100)
             o4 = exchange.fetch_ohlcv(symbol, timeframe='4h', limit=100)
@@ -72,7 +64,9 @@ def update_all(symbols, focus_s):
             v15[sym] = df15['v'].iloc[-5:].mean() / df15['v'].rolling(30).mean().iloc[-1]
             data_4h[sym] = pd.DataFrame(o4)[4]
 
-    s4 = np.linalg.eigh(pd.DataFrame(data_4h).dropna().pct_change().corr())[0][-1] if len(data_4h) > 5 else 0
+    # Calcul des deux cohésions (Matrice de corrélation de Wigner)
+    s15 = np.linalg.eigh(pd.DataFrame(data_15m).dropna().pct_change().dropna().corr())[0][-1] if len(data_15m) > 5 else 0
+    s4 = np.linalg.eigh(pd.DataFrame(data_4h).dropna().pct_change().dropna().corr())[0][-1] if len(data_4h) > 5 else 0
     
     try:
         of = exchange.fetch_ohlcv(focus_s, timeframe='1h', limit=30)
@@ -81,29 +75,22 @@ def update_all(symbols, focus_s):
         atr_p = (dff['tr'].rolling(14).mean().iloc[-1] / prices[focus_s]) * 100
     except: atr_p = 0.0
 
-    return s4, d15, v15, prices.get(focus_s, 0), atr_p, prices.get('DXY', 0)
+    return s15, s4, d15, v15, prices.get(focus_s, 0), atr_p, prices.get('DXY', 0)
 
 # --- AFFICHAGE ---
-s4, d15, v15, p_f, atr, p_dxy = update_all(selected_symbols, focus_symbol)
+s15, s4, d15, v15, p_f, atr, p_dxy = update_all(selected_symbols, focus_symbol)
 
-# Métriques Macro
-col_d1, col_d2 = st.columns(2)
-col_d1.metric("💵 Index Dollar (DXY)", f"{p_dxy:.2f}")
+# Bloc Macro Dollar
+st.metric("💵 Index Dollar (DXY)", f"{p_dxy:.2f}")
 st.divider()
 
-# Métriques de l'Actif Focus
+# Métriques Système et Actif Focus
 st.subheader(f"📊 Analyse : {focus_symbol}")
-m1, m2, m3 = st.columns(3)
-m1.metric("Cohésion Marché (4h)", f"{s4:.2f}")
-m2.metric("Volatilité (1h)", f"{atr:.2f}%")
-m3.metric(f"Cours {focus_symbol}", f"{p_f:.4f} $")
-
-# Suivi de position
-if entry_price > 0:
-    st.divider()
-    diff = ((p_f - entry_price) / entry_price) * 100
-    st.subheader(f"🎯 Position sur {focus_symbol}")
-    st.metric("PnL Latent", f"{diff * leverage:.2f}%", delta=f"{diff:.2f}% net")
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Cohésion 15m", f"{s15:.2f}")
+m2.metric("Cohésion 4h", f"{s4:.2f}")
+m3.metric("Volatilité (1h)", f"{atr:.2f}%")
+m4.metric(f"Prix {focus_symbol}", f"{p_f:.2f} $")
 
 # Radar de Force
 st.divider()
