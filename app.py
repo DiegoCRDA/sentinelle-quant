@@ -7,43 +7,45 @@ import matplotlib.pyplot as plt
 from concurrent.futures import ThreadPoolExecutor
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Sentinelle v2.9.1 - Macro Focus", layout="centered")
-st.title("🛡️ Sentinelle Quant Pro v2.9.1")
+st.set_page_config(page_title="Sentinelle v3.1 - Macro Alpha", layout="centered")
+st.title("🛡️ Sentinelle Quant Pro v3.1")
 
 exchange = ccxt.kraken()
 
 # --- SYMBOLES ---
-# Note : DXY est maintenant inclus par défaut
 default_symbols = [
     'BTC/USD', 'ETH/USD', 'SOL/USD', 'RENDER/USD', 'FET/USD', 
     'STX/USD', 'DOT/USD', 'NEAR/USD', 'SUI/USD', 'LINK/USD', 
     'PAXG/USD', 'GOOGL/USD', 'DXY'
 ]
 
-st.sidebar.header("⚙️ Configuration")
-selected_symbols = st.sidebar.multiselect("Matrice d'actifs :", options=default_symbols, default=default_symbols)
-focus_symbol = st.sidebar.selectbox("Focus Tactique :", options=selected_symbols, index=selected_symbols.index('NEAR/USD') if 'NEAR/USD' in selected_symbols else 0)
+st.sidebar.header("⚙️ Matrice")
+selected_symbols = st.sidebar.multiselect("Actifs à surveiller :", options=default_symbols, default=default_symbols)
+focus_symbol = st.sidebar.selectbox("Actif Focus :", options=selected_symbols, index=0)
 atr_mult = st.sidebar.slider("Sensibilité Stop (ATR) :", 1.0, 3.0, 2.0, 0.1)
 
 st.sidebar.divider()
-st.sidebar.header("📋 Ma Position Live")
+st.sidebar.header("📋 Ma Position")
 entry_price = st.sidebar.number_input("Prix d'entrée ($)", value=0.0, step=0.0001, format="%.4f")
 leverage = st.sidebar.number_input("Levier (x)", value=1, min_value=1)
 
-if st.button("⚡ Rafraîchir tout le système"):
+if st.button("⚡ Actualiser les flux"):
     st.cache_data.clear()
 
 # --- MOTEUR HYBRIDE ---
 def fetch_parallel(symbol):
     try:
+        # Données Macro (DXY & GOOGL) via Yahoo Finance
         if symbol == "GOOGL/USD" or symbol == "DXY":
-            ticker_str = "GOOGL" if "GOOGL" in symbol else "DX-Y.NYB"
-            yf_obj = yf.Ticker(ticker_str)
-            df = yf_obj.history(period="2d", interval="15m")
-            df4h = yf_obj.history(period="1mo", interval="1h")
+            yf_ticker = "DX-Y.NYB" if symbol == "DXY" else "GOOGL"
+            ticker_yf = yf.Ticker(yf_ticker)
+            df = ticker_yf.history(period="2d", interval="15m")
+            df4h = ticker_yf.history(period="1mo", interval="1h")
             o15 = [[int(t.timestamp()*1000), r.Open, r.High, r.Low, r.Close, r.Volume] for t, r in df.iterrows()]
             o4 = [[int(t.timestamp()*1000), r.Open, r.High, r.Low, r.Close, r.Volume] for t, r in df4h.iterrows()]
             return symbol, o15, o4, df['Close'].iloc[-1]
+        
+        # Données Crypto via Kraken
         else:
             o15 = exchange.fetch_ohlcv(symbol, timeframe='15m', limit=100)
             o4 = exchange.fetch_ohlcv(symbol, timeframe='4h', limit=100)
@@ -53,8 +55,7 @@ def fetch_parallel(symbol):
 
 @st.cache_data(ttl=15)
 def update_all(symbols, focus_s):
-    d15, v15, d4h, prices = {}, {}, {}, {}
-    data_15m, data_4h = {}, {}
+    d15, v15, prices, data_15m, data_4h = {}, {}, {}, {}, {}
     
     with ThreadPoolExecutor(max_workers=15) as executor:
         results = list(executor.map(fetch_parallel, symbols))
@@ -71,10 +72,8 @@ def update_all(symbols, focus_s):
             v15[sym] = df15['v'].iloc[-5:].mean() / df15['v'].rolling(30).mean().iloc[-1]
             data_4h[sym] = pd.DataFrame(o4)[4]
 
-    s15 = np.linalg.eigh(pd.DataFrame(data_15m).dropna().pct_change().corr())[0][-1] if len(data_15m) > 5 else 0
     s4 = np.linalg.eigh(pd.DataFrame(data_4h).dropna().pct_change().corr())[0][-1] if len(data_4h) > 5 else 0
     
-    # ATR Focus
     try:
         of = exchange.fetch_ohlcv(focus_s, timeframe='1h', limit=30)
         dff = pd.DataFrame(of, columns=['t','o','h','l','c','v'])
@@ -82,38 +81,33 @@ def update_all(symbols, focus_s):
         atr_p = (dff['tr'].rolling(14).mean().iloc[-1] / prices[focus_s]) * 100
     except: atr_p = 0.0
 
-    return s15, s4, d15, v15, prices.get(focus_s, 0), atr_p, prices.get('DXY', 0)
+    return s4, d15, v15, prices.get(focus_s, 0), atr_p, prices.get('DXY', 0)
 
-# --- EXÉCUTION & AFFICHAGE ---
-with st.spinner("Calcul des flux macro..."):
-    s15, s4, d15, v15, p_f, atr, p_dxy = update_all(selected_symbols, focus_symbol)
+# --- AFFICHAGE ---
+s4, d15, v15, p_f, atr, p_dxy = update_all(selected_symbols, focus_symbol)
 
-# Conseil d'Action
-st.header("💡 Conseil d'Action Rationnel")
-state = d15.get(focus_symbol)
-if s4 > 7.0 and state == "BUY" and v15.get(focus_symbol, 0) > 1.0:
-    st.success(f"🔥 ACHAT (HAUTE CONVICTION) - Entrée : {p_f * (1-(atr/100)):.4f} $")
-else: st.info("🧘 OBSERVATION - Pas de confluence.")
-
-# --- NOUVELLE SECTION MACRO ---
+# Métriques Macro
+col_d1, col_d2 = st.columns(2)
+col_d1.metric("💵 Index Dollar (DXY)", f"{p_dxy:.2f}")
 st.divider()
-col_m1, col_m2 = st.columns(2)
-col_m1.metric("💵 Index Dollar (DXY)", f"{p_dxy:.2f}")
-dxy_state = d15.get('DXY', 'NEUTRAL')
-if dxy_state == "BUY": col_m2.error("DXY Fort (Risque ⚠️)")
-elif dxy_state == "SELL": col_m2.success("DXY Faible (Boost 🚀)")
-else: col_m2.info("DXY Stable")
 
-# Métriques Système
-st.divider()
-st.subheader("📊 Métriques Système")
+# Métriques de l'Actif Focus
+st.subheader(f"📊 Analyse : {focus_symbol}")
 m1, m2, m3 = st.columns(3)
-m1.metric("Cohésion 4h", f"{s4:.2f}")
-m2.metric("Volatilité", f"{atr:.2f}%")
-m3.metric("Prix Focus", f"{p_f:.4f} $")
+m1.metric("Cohésion Marché (4h)", f"{s4:.2f}")
+m2.metric("Volatilité (1h)", f"{atr:.2f}%")
+m3.metric(f"Cours {focus_symbol}", f"{p_f:.4f} $")
 
-# Radar
-st.subheader("📡 Radar de Force & Macro")
+# Suivi de position
+if entry_price > 0:
+    st.divider()
+    diff = ((p_f - entry_price) / entry_price) * 100
+    st.subheader(f"🎯 Position sur {focus_symbol}")
+    st.metric("PnL Latent", f"{diff * leverage:.2f}%", delta=f"{diff:.2f}% net")
+
+# Radar de Force
+st.divider()
+st.subheader("📡 Radar de Force (Volume & Direction)")
 fig, ax = plt.subplots(figsize=(10, 6))
 colors = ['#2E7D32' if d15.get(s) == "BUY" else ('#C62828' if d15.get(s) == "SELL" else '#757575') for s in selected_symbols]
 ax.barh(selected_symbols, [v15.get(s, 0) for s in selected_symbols], color=colors)
